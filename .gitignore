@@ -1,3 +1,4 @@
 weights/*
 Dockerfile
 logs/*
+__pycache__/*
