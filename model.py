@@ -4,18 +4,15 @@ import os
 import time
 import string
 import warnings
-import uuid  # TODO: install to Docker Image
 from io import BytesIO
 from typing import List
 import datetime
-import shutil
 
 # Related third party imports
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from PIL import Image
-from apscheduler.schedulers.background import BackgroundScheduler  # TODO: Install to Docker Image
 import torch
 
 # Local application/library specific imports
@@ -31,11 +28,18 @@ warnings.filterwarnings('ignore', category=UserWarning, message=".*torch.meshgri
 warnings.filterwarnings('ignore', category=UserWarning, message=".*_IncompatibleKeys.*")
 
 model = None
+device = "cuda"
+
 def load_model():
     global model
 
-    config_file = 'GroundingDINO/config/GroundingDINO_SwinB_cfg.py'
-    checkpoint_path = 'weights/groundingdino_swinb_cogcoor.pth'
+    # config_file = 'GroundingDINO/config/GroundingDINO_SwinB_cfg.py'
+    # checkpoint_path = 'weights/groundingdino_swinb_cogcoor.pth'
+
+    config_file = 'GroundingDINO/config/GroundingDINO_SwinT_OGC.py'
+    checkpoint_path = 'weights/groundingdino_swint_ogc.pth'
+
+
     cpu_only = False
 
     args = SLConfig.fromfile(config_file)
@@ -57,7 +61,6 @@ def load_image(image_pil):
     ])
     image, _ = transform(image_pil, None)  # 3, h, w
     return image_pil, image
-
 
 def get_grounding_output(model, image, caption, box_threshold, text_threshold=None, with_logits=True, cpu_only=False, token_spans=None):
     assert text_threshold is not None or token_spans is not None, "text_threshould and token_spans should not be None at the same time!"
@@ -120,7 +123,6 @@ def get_grounding_output(model, image, caption, box_threshold, text_threshold=No
         boxes_filt = torch.cat(all_boxes, dim=0).cpu()
         pred_phrases = all_phrases
 
-
     return boxes_filt, pred_phrases
 
 app = FastAPI()
@@ -139,21 +141,6 @@ app.add_middleware(
     allow_headers=["*"], # Allows all headers
 )
 
-def cleanup_old_jobs():
-    threshold = datetime.timedelta(hours=1)  # Set timeout
-    now = datetime.datetime.now()
-
-    for job_dir in os.listdir(temp_storage):
-        job_path = os.path.join(temp_storage, job_dir)
-        creation_time = os.path.getctime(job_path)
-        if (now - datetime.datetime.fromtimestamp(creation_time)) > threshold:
-            shutil.rmtree(job_path)  # Delete the job directory
-
-# FastAPI Startup
-scheduler = BackgroundScheduler()
-scheduler.add_job(cleanup_old_jobs, 'interval', minutes=30)  
-scheduler.start()
-
 @app.on_event("startup")
 async def startup_event():
     load_model() # Load the model on startup
@@ -165,36 +152,37 @@ def index():
     <!DOCTYPE html>
     <html>
         <head>
-            <title>GroundingDINO Demo</title>
+            <title>G-DINO Slave</title>
         </head>
         <body>
-            <h1>GroundingDINO Demo Updated</h1>
+            <h1>GroundingDINO Demo Slave</h1>
         </body>
     </html>
     """
 
-@app.post("/detect/")
-async def detect_objects(image: UploadFile = File(...), text_prompt: str = Form(...), 
-                         box_threshold: float = Form(0.3), text_threshold: float = Form(0.3)):
+@app.post("/detect")
+async def detect_objects(request: Request):
     global model
-    gpu_id = os.getenv("GPU_ID", "Not set")
-    print(f"Processing request on GPU: {gpu_id}")
-    # print(f"Verifying params: text_prompt ({text_prompt}), box_threshold ({box_threshold}), text_threshold ({text_threshold})")
-
     try:
-        # Read image as bytes
-        image_data = await image.read()
+        request_data = await request.json()
+
+        # Extract the required variables from the request data
+        # image_tensor = torch.tensor(request_data["image"], device=device)
+
+        # Extract the required variables from the request data
+        image_data = base64.b64decode(request_data["image"].encode('utf-8'))
+        text_prompt = request_data["text_prompt"]
+        box_threshold = request_data["box_threshold"]
+        text_threshold = request_data["text_threshold"]
+
+        image = Image.open(BytesIO(image_data))
         # Open the image with PIL
-        image_pil = Image.open(BytesIO(image_data)).convert("RGB")
+        _, image_tensor = load_image(image)
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    
-    # Preprocess the image
-    _, image_tensor = load_image(image_pil)
+        print(f"Error decoding JSON: {e}")
+        return {"error": str(e)}
 
-    text_prompt = text_prompt.lower() # Convert to lower case
-    
     # Perform inference
     start_time = time.perf_counter()
     boxes, labels = get_grounding_output(model, image_tensor, text_prompt, box_threshold, text_threshold)
@@ -236,35 +224,3 @@ async def detect_objects(image: UploadFile = File(...), text_prompt: str = Form(
             valid_boxes.append(boxes_list[i])
 
     return {"bounding_boxes": valid_boxes, "labels": labels_list, "confidence": conf_list, "inference_time": inference_time}
-
-temp_storage = "temp_storage"
-@app.post("/video_inference")
-async def detect_objects(image: UploadFile = File(...), text_prompt: str = Form(...), 
-                         box_threshold: float = Form(0.3), text_threshold: float = Form(0.3)):
-    # 1. Job ID for unique work directory
-    job_id = str(uuid.uuid4()) 
-    job_dir = os.path.join(temp_storage, job_id)
-    os.makedirs(job_dir, exist_ok=True)  # Create if doesn't exist
-        
-    # 2. Save video temporarily
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
-        contents = await image.read()
-        temp_video.write(contents)
-        video_path = temp_video.name  # Get temporary file path
-
-    # 3. Frame Extraction 
-    frames_dir = os.path.join(job_dir, "frames")
-    os.makedirs(frames_dir, exist_ok=True)
-
-    # 4. Perform inference on each frame
-    # ... your inference logic on frames in 'frames_dir' ...
-
-    # 5. Generate labelled video
-    # output_video_path = os.path.join(job_dir, "output.mp4")
-
-
-    # 6. Return information for frontend access
-    return {
-        "job_id": job_id,
-        "video_url": f"/videos/{job_id}/output.mp4"  # Example URL pattern
-    }
