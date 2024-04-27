@@ -33,11 +33,11 @@ device = "cuda"
 def load_model():
     global model
 
-    # config_file = 'GroundingDINO/config/GroundingDINO_SwinB_cfg.py'
-    # checkpoint_path = 'weights/groundingdino_swinb_cogcoor.pth'
+    config_file = 'GroundingDINO/config/GroundingDINO_SwinB_cfg.py'
+    checkpoint_path = 'weights/groundingdino_swinb_cogcoor.pth'
 
-    config_file = 'GroundingDINO/config/GroundingDINO_SwinT_OGC.py'
-    checkpoint_path = 'weights/groundingdino_swint_ogc.pth'
+    # config_file = 'GroundingDINO/config/GroundingDINO_SwinT_OGC.py'
+    # checkpoint_path = 'weights/groundingdino_swint_ogc.pth'
 
 
     cpu_only = False
